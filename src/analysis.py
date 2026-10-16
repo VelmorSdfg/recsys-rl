@@ -1,0 +1,154 @@
+"""Шаг 4: сводный анализ.
+
+1. Аналитический оптимум. Для одного шага задача «max E_π[r] − β·KL(π || π_ref)» решается в
+   закрытом виде: π*(a) ∝ π_ref(a)·exp(r(a)/β). Значит, оптимальную RL-политику можно получить
+   без обучения — переранжировать кандидатов исходной модели по log π_ref + r/β. Берём топ-500 исходной
+   модели (за ними почти нулевая вероятность) и проходим по сетке β: получаем полную кривую
+   «релевантность ↔ награда» для каждой функции награды и опорную точку для GRPO.
+2. Таблица всех RL-прогонов с парными бутстрап-интервалами NDCG@10 к исходной модели.
+3. Проверка на реальных откликах: среди рекомендованных треков, которые юзер реально послушал в
+   следующих 10 прослушиваниях, — реальная доля дослушивания и доля лайков. Это единственная метрика
+   награды, которая не зависит от reward model.
+
+    python src/analysis.py
+"""
+import json
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from common import DEV, RESULTS, Seqs, limit_gpu_memory
+from lib import behaviour, bootstrap_diff, build_gpt, contexts, policy_logits, rank_metrics
+from rm import Scorer, ctx_batch, load_rm
+from rl_grpo import reward_fn
+
+OUT = RESULTS / "analysis"
+TOPN = 500
+BETAS = [None, 3, 1, 0.3, 0.1, 0.05, 0.03, 0.02, 0.01, 0.005, 0]
+REWARDS = ["ratio", "time", "like", "ratio_like", "cont", "ratio_norep"]
+
+
+def real_outcomes(S, pos, top):
+    """Реальный отклик на рекомендованные треки, которые юзер действительно послушал в ближайших 10."""
+    rat, lik, n_hit = [], [], 0
+    for i, p in enumerate(pos):
+        u_end = S.user_start[np.searchsorted(S.user_start, p, side="right")]
+        j = np.arange(p, min(p + 10, u_end))
+        sel = j[np.isin(S.tok[j], top[i]) & (S.tok[j] >= 2)]
+        rat.extend(S.ratio[sel].astype(float))
+        lik.extend(S.like[sel].astype(float))
+        n_hit += len(sel) > 0
+    return {"реально послушано рекомендованных, на точку": len(rat) / len(pos),
+            "их реальная доля дослушивания": float(np.mean(rat)) if rat else float("nan"),
+            "их реальная доля лайков": float(np.mean(lik)) if lik else float("nan")}
+
+
+@torch.no_grad()
+def analytic(S, base, scA, scB, tok_len, mean_len):
+    pos, fut = S.test_pos, S.test_future
+    rows, _ = contexts(S, pos)
+    cand, lpi, rA, rB = [], [], [], []
+    for i, lg in policy_logits(base, S, pos):
+        lp = torch.log_softmax(lg, -1)
+        v, c = torch.topk(lp, TOPN)
+        p = pos[i:i + len(lg)]
+        hA = scA.hidden(*ctx_batch(S, p))
+        hB = scB.hidden(*ctx_batch(S, p))
+        cand.append(c)
+        lpi.append(v)
+        rA.append(scA(hA, c))
+        rB.append(scB(hB, c))
+    cand, lpi, rA, rB = (torch.cat(t) for t in (cand, lpi, rA, rB))
+    hist = torch.from_numpy(np.stack([np.pad(r[-200:], (200 - len(r[-200:]), 0)) for r in rows]).astype(np.int64)).to(DEV)
+    res = {}
+    for rw in REWARDS:
+        # награда в масштабе, где β сопоставимы: делим на std награды по кандидатам
+        r = reward_fn(rw, rA, cand, hist, tok_len, mean_len)
+        r = r / r.std()
+        curve = []
+        for beta in BETAS:
+            score = lpi if beta is None else (r if beta == 0 else lpi + r / beta)
+            o = torch.argsort(score, 1, descending=True)[:, :10]
+            top = cand.gather(1, o)
+            ndcg, hr = rank_metrics(top.cpu().numpy(), fut[:, 0])
+            ga = lambda t, j: t.gather(1, o[..., None].expand(-1, -1, 3))[..., j].mean().item()
+            rec = {"beta": beta, "NDCG@10": float(ndcg.mean()), "Recall@10": float(hr.mean()),
+                   "A: дослушивание": ga(rA, 0), "B: дослушивание": ga(rB, 0),
+                   "A: лайк": ga(rA, 1), "B: лайк": ga(rB, 1), "A: продолжение": ga(rA, 2), "B: продолжение": ga(rB, 2),
+                   "A: время, с": (rA[..., 0].gather(1, o) * tok_len[top]).mean().item(),
+                   "B: время, с": (rB[..., 0].gather(1, o) * tok_len[top]).mean().item(),
+                   **behaviour(S, top.cpu().numpy(), rows), **real_outcomes(S, pos, top.cpu().numpy())}
+            curve.append(rec)
+        res[rw] = curve
+        print(rw, [(c["beta"], round(c["NDCG@10"], 4), round(c["A: дослушивание"], 3), round(c["B: дослушивание"], 3))
+                   for c in curve], flush=True)
+    return res
+
+
+def rl_table(S, base_ndcg):
+    users = np.searchsorted(S.user_start, S.test_pos, side="right") - 1
+    rows = {}
+    for d in sorted((RESULTS / "rl").glob("*/final.json")):
+        f = json.load(open(d, encoding="utf-8"))
+        nd = np.load(d.parent / "test_ndcg.npy")
+        top = np.load(d.parent / "test_top.npy")
+        rows[d.parent.name] = {"args": f["args"], **f["test"],
+                               "ΔNDCG@10 к исходной, 95% CI": bootstrap_diff(nd, base_ndcg, users),
+                               **real_outcomes(S, S.test_pos, top)}
+    return rows
+
+
+def plot(analytic_res, rl_rows, base):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    colors = dict(zip(REWARDS, ["#2a78d6", "#eb6834", "#1baf7a", "#8a5cd1", "#c9a227", "#d6457a"]))
+    for ax, judge in zip(axes, ["A", "B"]):
+        for rw in ["ratio", "ratio_norep", "cont"]:
+            c = analytic_res[rw]
+            ax.plot([r["NDCG@10"] for r in c], [r[f"{judge}: дослушивание"] for r in c], "-o", ms=3,
+                    color=colors[rw], label=f"оптимум π_ref·exp(r/β), награда {rw}")
+        for name, r in rl_rows.items():
+            if r["args"]["horizon"] == 1:
+                ax.plot(r["NDCG@10"], r[f"{judge}: дослушивание"], "*", ms=11,
+                        color=colors.get(r["args"]["reward"], "k"), mec="k", mew=0.5)
+                ax.annotate(name, (r["NDCG@10"], r[f"{judge}: дослушивание"]), fontsize=6, xytext=(3, 3),
+                            textcoords="offset points")
+        ax.plot(base["NDCG@10"], base[f"{judge}: дослушивание"], "ks", ms=8, label="исходная GPT-2")
+        ax.set_xlabel("NDCG@10 на test")
+        ax.set_ylabel(f"предсказанное дослушивание топ-10, reward model {judge}")
+        ax.set_title("оценка по рабочей модели A (по ней учится RL)" if judge == "A"
+                     else "оценка независимым судьёй B", fontsize=10)
+        ax.grid(alpha=0.3)
+    axes[0].legend(fontsize=7, loc="lower left")
+    fig.suptitle("Компромисс релевантность ↔ награда (звёзды — GRPO, линии — аналитический оптимум)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(OUT / "tradeoff.png", dpi=150)
+
+
+def main():
+    limit_gpu_memory()
+    OUT.mkdir(parents=True, exist_ok=True)
+    S = Seqs()
+    tok_len = torch.as_tensor(S.tok_len, device=DEV)
+    mean_len = float(np.average(S.tok_len[2:], weights=S.tok_cnt[2:]))
+    base = build_gpt().to(DEV)
+    base.load_state_dict(torch.load(RESULTS / "base" / "model.pt"))
+    base.eval()
+    scA = Scorer(load_rm(RESULTS / "reward" / "rm_A.pt"), S.tok_len)
+    scB = Scorer(load_rm(RESULTS / "reward" / "rm_B.pt"), S.tok_len)
+    an = analytic(S, base, scA, scB, tok_len, mean_len)
+    json.dump(an, open(OUT / "analytic.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    base_ndcg = np.load(RESULTS / "base" / "test_ndcg.npy")
+    rl = rl_table(S, base_ndcg)
+    base_row = an["ratio"][0]
+    json.dump({"base": base_row, "rl": rl}, open(OUT / "rl_table.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    plot(an, rl, base_row)
+    for k, v in rl.items():
+        print(k, {kk: (round(vv, 4) if isinstance(vv, float) else vv) for kk, vv in v.items() if kk != "args"})
+
+
+if __name__ == "__main__":
+    main()
