@@ -3,6 +3,7 @@
 Для каждой тестовой точки два режима:
     generated  политика жадно выбирает трек, он дописывается в контекст (как будто юзер его послушал),
                reward model получает предсказанную ею же долю дослушивания;
+    generated_norep  то же, но уже сгенерированные треки запрещены (без «залипания»);
     real       в контекст дописывается трек, который юзер реально послушал (teacher forcing).
 На шаге k измеряем: Recall@10 / NDCG@10 для реального k-го следующего трека, предсказанный отклик
 reward models A и B на выбранный трек и их расхождение |A − B|, энтропию политики,
@@ -42,9 +43,12 @@ def run(model, S, pos, fut, scA, scB, mode):
         ra = [t.to(DEV) for t in ctx_batch(S, p)]
         rb = [t.clone() for t in ra]
         prev = torch.full((len(p),), -1, device=DEV)
+        gen = []
         for k in range(STEPS):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 lg = last_logits(model, x, m, pp)
+            if mode == "generated_norep" and gen:
+                lg = lg.scatter(1, torch.stack(gen, 1), float("-inf"))
             lp = torch.log_softmax(lg, -1)
             top = torch.topk(lg, 10).indices
             a = top[:, 0]
@@ -64,7 +68,8 @@ def run(model, S, pos, fut, scA, scB, mode):
             stats["повтор из контекста"][k] += (x == a[:, None]).any(1).float().sum().item()
             stats["тот же трек, что шаг назад"][k] += (a == prev).float().sum().item()
             prev = a
-            if mode == "generated":
+            gen.append(a)
+            if mode.startswith("generated"):
                 nxt, ra_r, rb_r = a, pa[:, 0], pb[:, 0]
             else:                                   # реальный следующий трек и его реальное дослушивание
                 nxt = torch.where(tgt >= 1, tgt, torch.full_like(tgt, OOV))
@@ -98,7 +103,7 @@ def main():
         model = build_gpt().to(DEV)
         model.load_state_dict(torch.load(RESULTS / name / "model.pt"))
         model.eval()
-        for mode in ["generated", "real"]:
+        for mode in ["generated", "generated_norep", "real"]:
             res[f"{name} | {mode}"] = r = run(model, S, pos, fut, scA, scB, mode)
             print(name, mode, json.dumps(r, ensure_ascii=False), flush=True)
     (RESULTS / "multistep").mkdir(exist_ok=True)

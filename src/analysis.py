@@ -13,6 +13,7 @@
     python src/analysis.py
 """
 import json
+import os
 
 import matplotlib
 
@@ -67,7 +68,12 @@ def analytic(S, base, scA, scB, tok_len, mean_len):
     res = {}
     for rw in REWARDS:
         # награда в масштабе, где β сопоставимы: делим на std награды по кандидатам
-        r = reward_fn(rw, rA, cand, hist, tok_len, mean_len)
+        if rw == "ratio_norep":           # сравнение с историей кусками: [N, 500, 200] целиком не влезает
+            rep = torch.cat([(hist[i:i + 1000, None, :] == cand[i:i + 1000, :, None]).any(-1)
+                             for i in range(0, len(cand), 1000)]).float()
+            r = rA[..., 0] - 0.5 * rep
+        else:
+            r = reward_fn(rw, rA, cand, None, tok_len, mean_len)
         r = r / r.std()
         curve = []
         for beta in BETAS:
@@ -102,30 +108,82 @@ def rl_table(S, base_ndcg):
     return rows
 
 
+REAL_N, REAL_R, REAL_L = ("реально послушано рекомендованных, на точку", "их реальная доля дослушивания",
+                          "их реальная доля лайков")
+
+
 def plot(analytic_res, rl_rows, base):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
     colors = dict(zip(REWARDS, ["#2a78d6", "#eb6834", "#1baf7a", "#8a5cd1", "#c9a227", "#d6457a"]))
+    # 1. компромисс
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
     for ax, judge in zip(axes, ["A", "B"]):
-        for rw in ["ratio", "ratio_norep", "cont"]:
+        for rw in ["ratio", "ratio_norep"]:
             c = analytic_res[rw]
             ax.plot([r["NDCG@10"] for r in c], [r[f"{judge}: дослушивание"] for r in c], "-o", ms=3,
-                    color=colors[rw], label=f"оптимум π_ref·exp(r/β), награда {rw}")
+                    color=colors[rw], alpha=0.8, label=f"оптимум π_ref·exp(r/β), награда {rw}")
         for name, r in rl_rows.items():
-            if r["args"]["horizon"] == 1:
-                ax.plot(r["NDCG@10"], r[f"{judge}: дослушивание"], "*", ms=11,
-                        color=colors.get(r["args"]["reward"], "k"), mec="k", mew=0.5)
-                ax.annotate(name, (r["NDCG@10"], r[f"{judge}: дослушивание"]), fontsize=6, xytext=(3, 3),
-                            textcoords="offset points")
+            a = r["args"]
+            if a["horizon"] != 1 or a["reward"] not in ("ratio", "ratio_norep"):
+                continue
+            mk = "*" if a.get("adv", "group_std") == "group_std" else "D"
+            ax.plot(r["NDCG@10"], r[f"{judge}: дослушивание"], mk, ms=10 if mk == "*" else 6,
+                    color=colors[a["reward"]], mec="k", mew=0.6)
+            ax.annotate(f"β={a['beta']:g}", (r["NDCG@10"], r[f"{judge}: дослушивание"]), fontsize=6,
+                        xytext=(4, -2), textcoords="offset points")
         ax.plot(base["NDCG@10"], base[f"{judge}: дослушивание"], "ks", ms=8, label="исходная GPT-2")
+        ax.plot([], [], "*", color="gray", mec="k", ms=10, label="GRPO (нормировка на std группы)")
+        ax.plot([], [], "D", color="gray", mec="k", ms=6, label="GRPO (фиксированный масштаб)")
         ax.set_xlabel("NDCG@10 на test")
-        ax.set_ylabel(f"предсказанное дослушивание топ-10, reward model {judge}")
-        ax.set_title("оценка по рабочей модели A (по ней учится RL)" if judge == "A"
-                     else "оценка независимым судьёй B", fontsize=10)
+        ax.set_ylabel(f"предсказанное дослушивание топ-10 ({judge})")
+        ax.set_title("по рабочей reward model A (по ней учится RL)" if judge == "A"
+                     else "по независимой reward model B", fontsize=10)
         ax.grid(alpha=0.3)
     axes[0].legend(fontsize=7, loc="lower left")
-    fig.suptitle("Компромисс релевантность ↔ награда (звёзды — GRPO, линии — аналитический оптимум)", fontsize=11)
+    fig.suptitle("Компромисс релевантность ↔ награда «дослушивание»", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "tradeoff.png", dpi=150)
+    plt.close(fig)
+
+    # 2. поведение вдоль кривой оптимума (награда ratio)
+    c = [r for r in analytic_res["ratio"] if r["beta"] is not None]
+    x = np.arange(len(c))
+    fig, axes = plt.subplots(1, 4, figsize=(14, 3.4))
+    for ax, key, title in zip(axes, ["длина трека, с", "покрытие каталога", "доля повторов из истории", "NDCG@10"],
+                              ["средняя длина трека, с", "покрытие каталога", "доля уже слушанного", "NDCG@10"]):
+        ax.plot(x, [r[key] for r in c], "-o", color=colors["ratio"], ms=4)
+        ax.axhline(base[key], color="k", ls="--", lw=1)
+        ax.set_xticks(x, [f"{r['beta']:g}" for r in c], fontsize=7)
+        ax.set_xlabel("β (меньше — сильнее оптимизация)", fontsize=8)
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.3)
+    fig.suptitle("Что меняется в выдаче при оптимизации дослушивания (пунктир — исходная модель)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(OUT / "behaviour.png", dpi=150)
+    plt.close(fig)
+
+    # 3. предсказание reward model против реальности
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for ax, (rw, pkey, rkey, title) in zip(axes, [
+            ("like", "A: лайк", REAL_L, "награда «лайк»"), ("ratio", "A: дослушивание", REAL_R, "награда «дослушивание»")]):
+        c = [r for r in analytic_res[rw] if r["beta"] is not None and r[REAL_N] > 0.2]
+        rel = lambda v, v0: v / v0 - 1
+        ax.plot([r["beta"] for r in c], [rel(r[pkey], base[pkey]) * 100 for r in c], "-o", ms=4, color="#2a78d6",
+                label="предсказание reward model A для топ-10")
+        ax.plot([r["beta"] for r in c], [rel(r[pkey.replace("A:", "B:")], base[pkey.replace("A:", "B:")]) * 100
+                                         for r in c], "-o", ms=4, color="#8a5cd1", label="предсказание reward model B")
+        ax.plot([r["beta"] for r in c], [rel(r[rkey], base[rkey]) * 100 for r in c], "-s", ms=4, color="#eb6834",
+                label="реальный отклик на реально прослушанные рекомендации")
+        ax.set_xscale("log")
+        ax.invert_xaxis()
+        ax.axhline(0, color="k", lw=1)
+        ax.set_xlabel("β (вправо — сильнее оптимизация)")
+        ax.set_ylabel("изменение к исходной модели, %")
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.3)
+    axes[0].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(OUT / "reward_vs_real.png", dpi=150)
+    plt.close(fig)
 
 
 def main():
@@ -139,8 +197,11 @@ def main():
     base.eval()
     scA = Scorer(load_rm(RESULTS / "reward" / "rm_A.pt"), S.tok_len)
     scB = Scorer(load_rm(RESULTS / "reward" / "rm_B.pt"), S.tok_len)
-    an = analytic(S, base, scA, scB, tok_len, mean_len)
-    json.dump(an, open(OUT / "analytic.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    if (OUT / "analytic.json").exists() and not os.environ.get("RECOMPUTE"):
+        an = json.load(open(OUT / "analytic.json", encoding="utf-8"))     # аналитика не зависит от RL-прогонов
+    else:
+        an = analytic(S, base, scA, scB, tok_len, mean_len)
+        json.dump(an, open(OUT / "analytic.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     base_ndcg = np.load(RESULTS / "base" / "test_ndcg.npy")
     rl = rl_table(S, base_ndcg)
     base_row = an["ratio"][0]

@@ -92,10 +92,13 @@ def main():
     ap.add_argument("--horizon", type=int, default=1)
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--adv", choices=["group_std", "fixed"], default="group_std",
+                    help="group_std — как в GRPO: (r − среднее) / std группы; fixed — (r − среднее) / σ0, σ0 = std "
+                         "наград на первом батче (как Dr. GRPO): масштаб не растёт, когда политика сужается")
     ap.add_argument("--tag", default="")
     args = ap.parse_args()
     limit_gpu_memory()
-    tag = args.tag or f"{args.reward}_b{args.beta:g}" + (f"_h{args.horizon}" if args.horizon > 1 else "")
+    tag = args.tag or f"{args.reward}_b{args.beta:g}" + (f"_h{args.horizon}" if args.horizon > 1 else "")         + ("_fixed" if args.adv == "fixed" else "")
     out = OUT / tag
     out.mkdir(parents=True, exist_ok=True)
     S = Seqs()
@@ -105,6 +108,9 @@ def main():
     pol.load_state_dict(sd)
     ref.load_state_dict(sd)
     ref.eval().requires_grad_(False)
+    if args.horizon > 1:          # H проходов по 200 токенов с градиентом: активации пересчитываем, а не храним
+        pol.gradient_checkpointing_enable()
+        pol.config.use_cache = False
     tok_len = torch.as_tensor(S.tok_len, device=DEV)
     mean_len = float(np.average(S.tok_len[2:], weights=S.tok_cnt[2:]))
     rmA, rmB = load_rm(RESULTS / "reward" / "rm_A.pt"), load_rm(RESULTS / "reward" / "rm_B.pt")
@@ -169,7 +175,12 @@ def main():
                 x, m, pp = _append_tok(x, a)
                 rtok, rrb, rm_, rpos = append_generated(rtok, rrb, rm_, rpos, a, pr[:, 0, 0])
             logp, r = logp.view(B, G), r.view(B, G)
-        adv = (r - r.mean(1, keepdim=True)) / (r.std(1, keepdim=True) + 1e-6)
+        if args.adv == "group_std":
+            adv = (r - r.mean(1, keepdim=True)) / (r.std(1, keepdim=True) + 1e-6)
+        else:
+            if step == 1:
+                sigma0 = r.std().item() + 1e-6
+            adv = (r - r.mean(1, keepdim=True)) / sigma0
         loss = -(adv.detach() * logp).mean() + args.beta * kl
         opt.zero_grad(set_to_none=True)
         loss.backward()
