@@ -1,8 +1,8 @@
-"""Шаг 1: базовая модель GPT-2 на next item prediction (токены — id треков).
+"""Шаг 1: базовая модель GPT-2 на next item prediction (токены - id треков).
 
-Обучение только на прослушиваниях до t_valid. Окна по 201 токену, лосс — кросс-энтропия по всем
+Обучение только на прослушиваниях до t_valid. Окна по 201 токену, лосс - кросс-энтропия по всем
 позициям, кроме тех, где следующий трек вне словаря. Ранняя остановка по NDCG@10 на valid.
-Для сравнения считаются две эвристики: популярное в train и «самое частое в истории юзера».
+Для сравнения считаются две эвристики: популярное в train и 'самое частое в истории юзера'.
 
     python src/train_gpt.py
 """
@@ -53,7 +53,7 @@ def heuristics(S, split):
     hist = np.zeros((len(pos), 10), np.int64)
     for i, r in enumerate(rows):
         r = r[r >= 2]
-        u, inv = np.unique(r[::-1], return_inverse=True)       # ничьи — в пользу недавних
+        u, inv = np.unique(r[::-1], return_inverse=True)       # ничьи - в пользу недавних
         c = np.bincount(inv)
         first = np.full(len(u), len(r))
         np.minimum.at(first, inv, np.arange(len(r)))

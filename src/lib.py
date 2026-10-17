@@ -21,7 +21,7 @@ def _chunk_ce(h, w, y):
 
 def next_item_loss(model, x, m, pos, chunk=2048):
     """Кросс-энтропия next item по всем позициям, где следующий трек в словаре.
-    Логиты [позиции × 50 тыс.] целиком в память не влезают: считаем кусками и пересчитываем
+    Логиты [позиции x 50 тыс.] целиком в память не влезают: считаем кусками и пересчитываем
     на обратном проходе (checkpoint)."""
     h = model.transformer(input_ids=x[:, :-1], attention_mask=m[:, :-1], position_ids=pos[:, :-1]).last_hidden_state
     y = x[:, 1:]
@@ -56,7 +56,7 @@ def contexts(S, pos, L=CTX):
 def last_logits(model, x, m, pos):
     h = model.transformer(input_ids=x.to(DEV), attention_mask=m.to(DEV), position_ids=pos.to(DEV)).last_hidden_state
     lg = model.lm_head(h[:, -1]).float()
-    lg[:, PAD] = lg[:, OOV] = float("-inf")     # не рекомендуем паддинг и «трек вне словаря»
+    lg[:, PAD] = lg[:, OOV] = float("-inf")     # не рекомендуем паддинг и 'трек вне словаря'
     return lg
 
 

@@ -20,7 +20,7 @@ DEV = "cuda"
 
 
 def limit_gpu_memory():
-    """Лимит видеопамяти на процесс (RECSYS_GPU_GB, по умолчанию 5 ГБ; 0 — без лимита)."""
+    """Лимит видеопамяти на процесс (RECSYS_GPU_GB, по умолчанию 5 ГБ; 0 - без лимита)."""
     gb = float(os.environ.get("RECSYS_GPU_GB", "5"))
     if gb > 0 and torch.cuda.is_available():
         total = torch.cuda.get_device_properties(0).total_memory
@@ -34,7 +34,7 @@ def peak_gb():
 
 
 class Seqs:
-    """Все прослушивания, отсортированные по (юзер, время); user_start[u]..user_start[u+1] — юзер u."""
+    """Все прослушивания, отсортированные по (юзер, время); user_start[u]..user_start[u+1] - юзер u."""
 
     def __init__(self):
         z = np.load(DATA / "listens.npz")
@@ -46,5 +46,5 @@ class Seqs:
 
 
 def ratio_to_bin(r):
-    """r в [0, 1] -> корзина 1..RATIO_BINS (0 — паддинг)."""
+    """r в [0, 1] -> корзина 1..RATIO_BINS (0 - паддинг)."""
     return torch.clamp((r * RATIO_BINS).long(), max=RATIO_BINS - 1) + 1

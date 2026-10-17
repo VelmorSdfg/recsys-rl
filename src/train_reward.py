@@ -1,13 +1,13 @@
 """Шаг 2: reward model и её оценка на отложенных по времени прослушиваниях.
 
-Обучение — только на прослушиваниях до t_valid (те же окна, что у GPT-2). Оценка — на 200 тыс.
+Обучение - только на прослушиваниях до t_valid (те же окна, что у GPT-2). Оценка - на 200 тыс.
 случайных прослушиваний valid и test: для каждого модель видит 200 предыдущих прослушиваний юзера
 (с их долями дослушивания) и предсказывает отклик на реальный трек. Сравнение с эвристиками:
-среднее по всем, по треку, по юзеру и «юзер + трек».
+среднее по всем, по треку, по юзеру и 'юзер + трек'.
 
 Две модели с разной архитектурой и сидом:
-    A — «рабочая», по ней учится RL;
-    B — «независимый судья»: если RL поднимает награду по A, но не по B, политика эксплуатирует ошибки A.
+    A - 'рабочая', по ней учится RL;
+    B - 'независимый судья': если RL поднимает награду по A, но не по B, политика эксплуатирует ошибки A.
 
     python src/train_reward.py --name A
     python src/train_reward.py --name B --d 192 --layers 3 --seed 1
@@ -98,7 +98,7 @@ def baselines(S, pos):
         item = (it_s + 20 * g) / (it_n + 20)
         user = (us_s + 20 * g) / (us_n + 20)
         it = item[S.tok[pos]]
-        it = np.where(S.tok[pos] == 1, g, it)           # вне словаря — общее среднее
+        it = np.where(S.tok[pos] == 1, g, it)           # вне словаря - общее среднее
         out[h] = {"среднее": np.full(len(pos), g), "по треку": it, "по юзеру": user[u],
                   "юзер + трек": np.clip(user[u] + it - g, 1e-4, 1 - 1e-4)}
     return out
@@ -114,7 +114,7 @@ def metrics(S, pos, pred_by_head):
         if h == "ratio":
             full = (t >= 0.9).astype(int)
             res[h] = {"MAE": float(np.abs(p - t).mean()), "RMSE": float(np.sqrt(((p - t) ** 2).mean())),
-                      "Spearman": float(spearmanr(p, t).correlation), "AUC дослушал ≥90%": float(roc_auc_score(full, p))}
+                      "Spearman": float(spearmanr(p, t).correlation), "AUC дослушал >=90%": float(roc_auc_score(full, p))}
         else:
             ll = -np.mean(t * np.log(np.clip(p, 1e-6, 1)) + (1 - t) * np.log(np.clip(1 - p, 1e-6, 1)))
             res[h] = {"AUC": float(roc_auc_score(t, p)), "LogLoss": float(ll), "доля позитивов": float(t.mean())}

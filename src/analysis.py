@@ -1,13 +1,13 @@
 """Шаг 4: сводный анализ.
 
-1. Аналитический оптимум. Для одного шага задача «max E_π[r] − β·KL(π || π_ref)» решается в
-   закрытом виде: π*(a) ∝ π_ref(a)·exp(r(a)/β). Значит, оптимальную RL-политику можно получить
-   без обучения — переранжировать кандидатов исходной модели по log π_ref + r/β. Берём топ-500 исходной
+1. Аналитический оптимум. Для одного шага задача 'max E_π[r] - β*KL(π || π_ref)' решается в
+   закрытом виде: π*(a) ~ π_ref(a)*exp(r(a)/β). Значит, оптимальную RL-политику можно получить
+   без обучения - переранжировать кандидатов исходной модели по log π_ref + r/β. Берём топ-500 исходной
    модели (за ними почти нулевая вероятность) и проходим по сетке β: получаем полную кривую
-   «релевантность ↔ награда» для каждой функции награды и опорную точку для GRPO.
+   компромисса между релевантностью и наградой для каждой функции награды и опорную точку для GRPO.
 2. Таблица всех RL-прогонов с парными бутстрап-интервалами NDCG@10 к исходной модели.
 3. Проверка на реальных откликах: среди рекомендованных треков, которые юзер реально послушал в
-   следующих 10 прослушиваниях, — реальная доля дослушивания и доля лайков. Это единственная метрика
+   следующих 10 прослушиваниях, - реальная доля дослушивания и доля лайков. Это единственная метрика
    награды, которая не зависит от reward model.
 
     python src/analysis.py
@@ -120,7 +120,7 @@ def plot(analytic_res, rl_rows, base):
         for rw in ["ratio", "ratio_norep"]:
             c = analytic_res[rw]
             ax.plot([r["NDCG@10"] for r in c], [r[f"{judge}: дослушивание"] for r in c], "-o", ms=3,
-                    color=colors[rw], alpha=0.8, label=f"оптимум π_ref·exp(r/β), награда {rw}")
+                    color=colors[rw], alpha=0.8, label=f"оптимум π_ref*exp(r/β), награда {rw}")
         for name, r in rl_rows.items():
             a = r["args"]
             if a["horizon"] != 1 or a["reward"] not in ("ratio", "ratio_norep"):
@@ -139,7 +139,7 @@ def plot(analytic_res, rl_rows, base):
                      else "по независимой reward model B", fontsize=10)
         ax.grid(alpha=0.3)
     axes[0].legend(fontsize=7, loc="lower left")
-    fig.suptitle("Компромисс релевантность ↔ награда «дослушивание»", fontsize=11)
+    fig.suptitle("Компромисс между релевантностью и наградой (награда: дослушивание)", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "tradeoff.png", dpi=150)
     plt.close(fig)
@@ -153,10 +153,10 @@ def plot(analytic_res, rl_rows, base):
         ax.plot(x, [r[key] for r in c], "-o", color=colors["ratio"], ms=4)
         ax.axhline(base[key], color="k", ls="--", lw=1)
         ax.set_xticks(x, [f"{r['beta']:g}" for r in c], fontsize=7)
-        ax.set_xlabel("β (меньше — сильнее оптимизация)", fontsize=8)
+        ax.set_xlabel("β (меньше - сильнее оптимизация)", fontsize=8)
         ax.set_title(title, fontsize=10)
         ax.grid(alpha=0.3)
-    fig.suptitle("Что меняется в выдаче при оптимизации дослушивания (пунктир — исходная модель)", fontsize=11)
+    fig.suptitle("Что меняется в выдаче при оптимизации дослушивания (пунктир - исходная модель)", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "behaviour.png", dpi=150)
     plt.close(fig)
@@ -164,7 +164,7 @@ def plot(analytic_res, rl_rows, base):
     # 3. предсказание reward model против реальности
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     for ax, (rw, pkey, rkey, title) in zip(axes, [
-            ("like", "A: лайк", REAL_L, "награда «лайк»"), ("ratio", "A: дослушивание", REAL_R, "награда «дослушивание»")]):
+            ("like", "A: лайк", REAL_L, "награда: лайк"), ("ratio", "A: дослушивание", REAL_R, "награда: дослушивание")]):
         c = [r for r in analytic_res[rw] if r["beta"] is not None and r[REAL_N] > 0.2]
         rel = lambda v, v0: v / v0 - 1
         ax.plot([r["beta"] for r in c], [rel(r[pkey], base[pkey]) * 100 for r in c], "-o", ms=4, color="#2a78d6",
@@ -176,7 +176,7 @@ def plot(analytic_res, rl_rows, base):
         ax.set_xscale("log")
         ax.invert_xaxis()
         ax.axhline(0, color="k", lw=1)
-        ax.set_xlabel("β (вправо — сильнее оптимизация)")
+        ax.set_xlabel("β (вправо - сильнее оптимизация)")
         ax.set_ylabel("изменение к исходной модели, %")
         ax.set_title(title, fontsize=10)
         ax.grid(alpha=0.3)
